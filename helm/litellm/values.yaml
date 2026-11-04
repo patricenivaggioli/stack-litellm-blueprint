@@ -29,6 +29,9 @@ observability:
   galileoBaseUrl: https://api.galileo.ai
 service:
   port: 4000
+route:
+  enabled: true
+  host: ""
 resources:
   requests:
     cpu: 250m

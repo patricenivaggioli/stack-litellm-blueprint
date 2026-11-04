@@ -1,0 +1,22 @@
+{{- if .Values.route.enabled -}}
+{{- $name := (.Values.fullnameOverride | default (printf "%s-%s" .Release.Name .Chart.Name)) | trunc 63 | trimSuffix "-" -}}
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: {{ $name }}
+  labels:
+    app.kubernetes.io/name: litellm
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  {{- with .Values.route.host }}
+  host: {{ . | quote }}
+  {{- end }}
+  to:
+    kind: Service
+    name: {{ $name }}
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+{{- end }}

@@ -5,7 +5,10 @@ instructions:
     Select the Torque agent connected to London Lab OCPAI-02.
     Create the target namespace and a litellm-credentials Secret there before launch.
     Add only the credential keys required by the selected options.
-    When enabling observability, supply a Galileo Cloud project ID.
+    The chart creates an HTTPS OpenShift Route and shows its URL after launch.
+    Cisco AI Defense requires an enabled policy attached to the API-key connection.
+    Galileo defaults to the liteLLM gateway project and litellm-requests log stream;
+    override their IDs if you want another destination.
 metadata:
   display-name: LiteLLM gateway - London Lab
   self-service: [AI-Services]
@@ -51,13 +54,13 @@ inputs:
   ai_defense:
     type: string
     style: radio
-    default: 'no'
+    default: 'yes'
     allowed-values: ['yes', 'no']
     description: Enable Cisco AI Defense for request and response inspection.
   observability:
     type: string
     style: radio
-    default: 'no'
+    default: 'yes'
     allowed-values: ['yes', 'no']
     description: Send LiteLLM request logs to Galileo.
   credentials_secret:
@@ -100,11 +103,11 @@ inputs:
     description: Cisco AI Defense regional API base URL.
   galileo_project_id:
     type: string
-    default: ''
+    default: c31f19d9-d20d-44f8-bd8b-3c361f71db7b
     description: Galileo project ID, required when observability is enabled.
   galileo_log_stream_id:
     type: string
-    default: ''
+    default: ffc69b3a-b792-4907-b331-64ddf162af5d
     description: Optional Galileo log stream ID.
   galileo_base_url:
     type: string
@@ -113,6 +116,9 @@ inputs:
 outputs:
   service_url:
     value: 'http://litellm-{{ envId | downcase }}.{{ .inputs.namespace }}.svc.cluster.local:4000'
+  route_url:
+    value: '{{ .grains.litellm.scripts.post-helm-install.outputs.route_url }}'
+    kind: link
     quick: true
 grains:
   litellm:
@@ -125,6 +131,14 @@ grains:
         name: '{{ .inputs.agent }}'
       target-namespace: '{{ .inputs.namespace }}'
       command-arguments: '--create-namespace --wait --timeout 10m'
+      scripts:
+        post-helm-install:
+          source:
+            store: stack-litellm-blueprint
+            path: scripts/get-route-url.sh
+          arguments: 'litellm-{{ envId | downcase }} {{ .inputs.namespace }}'
+          outputs:
+            - route_url
       inputs:
         - fullnameOverride: 'litellm-{{ envId | downcase }}'
         - image.tag: '{{ .inputs.image_tag }}'
