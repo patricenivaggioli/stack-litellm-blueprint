@@ -36,6 +36,8 @@ Use your existing secret manager or OpenShift secret process. The London Lab not
 
 The chart creates an OpenShift Route for each release with edge TLS and HTTP-to-HTTPS redirect. OpenShift assigns a unique host; the blueprint reports the admitted `route_url` as a clickable output. The in-cluster `service_url` remains available for workloads inside OCPAI-02. The Route is Helm-managed and is removed with its release.
 
+The existing `QhCEY6FCKUby` environment has a Route created before this chart version. Adopt or remove that manual Route before upgrading that same Helm release to chart `0.2.0`; new environments create their own Helm-managed Routes automatically.
+
 This is a lean gateway deployment. It does not provision PostgreSQL or Redis, so it does not provide persistent virtual keys, spend tracking, or multi-replica operation. For those features, use LiteLLM's production chart with managed data stores.
 
 ## Validation and launch
