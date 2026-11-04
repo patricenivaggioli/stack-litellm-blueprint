@@ -5,7 +5,8 @@ instructions:
     Select the Torque agent connected to London Lab OCPAI-02.
     Create the target namespace and a litellm-credentials Secret there before launch.
     Add only the credential keys required by the selected options.
-    The chart creates an HTTPS OpenShift Route and shows its URL after launch.
+    The chart creates an HTTPS OpenShift Route at the selected host and shows its URL after launch.
+    A fixed host can be claimed by only one active deployment at a time.
     Cisco AI Defense requires an enabled policy attached to the API-key connection.
     Galileo defaults to the liteLLM gateway project and litellm-requests log stream;
     override their IDs if you want another destination.
@@ -17,6 +18,7 @@ customization:
     inputs:
       - name: agent
       - name: namespace
+      - name: route_host
       - name: providers
       - name: ai_defense
       - name: ai_defense_api_base
@@ -45,6 +47,10 @@ inputs:
     default: litellm
     description: Kubernetes namespace for this deployment; created if absent.
     pattern: '^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$'
+  route_host:
+    type: string
+    default: litellm-litellm.apps.ocpai-02.emea-geo-lab.com
+    description: Fixed OpenShift Route host. Use the same value across replacement deployments; only one active Route may claim it.
   providers:
     type: string
     style: multi-select
@@ -141,6 +147,7 @@ grains:
             - route_url
       inputs:
         - fullnameOverride: 'litellm-{{ envId | downcase }}'
+        - route.host: '{{ .inputs.route_host }}'
         - image.tag: '{{ .inputs.image_tag }}'
         - secretName: '{{ .inputs.credentials_secret }}'
         - providers.openai.enabled: '{% if .inputs.providers contains "OpenAI" %}true{% else %}false{% endif %}'

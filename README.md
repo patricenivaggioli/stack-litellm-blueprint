@@ -34,9 +34,7 @@ Use your existing secret manager or OpenShift secret process. The London Lab not
 - **Observability:** Enabled by default. LiteLLM's Galileo success callback logs LLM calls to the existing **liteLLM gateway** project (`c31f19d9-d20d-44f8-bd8b-3c361f71db7b`) and **litellm-requests** stream (`ffc69b3a-b792-4907-b331-64ddf162af5d`). Override either ID in the launch form for another destination. Galileo logging can include model input and output, so use an approved project.
 - **Local:** Choose Ollama or an OpenAI-compatible server. Set a URL reachable from the LiteLLM pod. The chart deploys only the LiteLLM proxy; it does not deploy the local model server.
 
-The chart creates an OpenShift Route for each release with edge TLS and HTTP-to-HTTPS redirect. OpenShift assigns a unique host; the blueprint reports the admitted `route_url` as a clickable output. The in-cluster `service_url` remains available for workloads inside OCPAI-02. The Route is Helm-managed and is removed with its release.
-
-The existing `QhCEY6FCKUby` environment has a Route created before this chart version. Adopt or remove that manual Route before upgrading that same Helm release to chart `0.2.0`; new environments create their own Helm-managed Routes automatically.
+The chart creates an OpenShift Route for each release with edge TLS and HTTP-to-HTTPS redirect. The blueprint defaults `route_host` to `litellm-litellm.apps.ocpai-02.emea-geo-lab.com`, so replacement deployments can keep the same address. Change the launch input if you need another host. Only one active Route may claim a host; remove the old deployment before launching its replacement at the same address. The blueprint reports the admitted `route_url` as a clickable output. The in-cluster `service_url` remains available for workloads inside OCPAI-02. The Route is Helm-managed and is removed with its release.
 
 This is a lean gateway deployment. It does not provision PostgreSQL or Redis, so it does not provide persistent virtual keys, spend tracking, or multi-replica operation. For those features, use LiteLLM's production chart with managed data stores.
 
