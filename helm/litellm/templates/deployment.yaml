@@ -86,6 +86,10 @@ spec:
                   key: CISCO_AI_DEFENSE_API_KEY
             {{- end }}
             {{- if $observability }}
+            {{- if $defense }}
+            - name: PYTHONPATH
+              value: /app
+            {{- end }}
             - name: GALILEO_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -105,6 +109,12 @@ spec:
               mountPath: /app/config.yaml
               subPath: config.yaml
               readOnly: true
+            {{- if and $defense $observability }}
+            - name: config
+              mountPath: /app/guardrail_trace.py
+              subPath: guardrail_trace.py
+              readOnly: true
+            {{- end }}
           resources:
 {{ toYaml .Values.resources | indent 12 }}
           readinessProbe:

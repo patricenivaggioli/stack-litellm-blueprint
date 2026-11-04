@@ -60,7 +60,11 @@ data:
     guardrails:
       - guardrail_name: cisco-ai-defense
         litellm_params:
+          {{- if $observability }}
+          guardrail: guardrail_trace.TracedCiscoAIDefenseGuardrail
+          {{- else }}
           guardrail: cisco_ai_defense
+          {{- end }}
           inspection_type: chat
           mode: [pre_call, post_call]
           api_key: os.environ/CISCO_AI_DEFENSE_API_KEY
@@ -73,3 +77,7 @@ data:
     litellm_settings:
       success_callback: [galileo]
     {{- end }}
+  {{- if and $defense $observability }}
+  guardrail_trace.py: |
+{{ .Files.Get "files/guardrail_trace.py" | indent 4 }}
+  {{- end }}
