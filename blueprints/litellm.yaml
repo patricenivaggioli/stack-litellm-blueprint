@@ -1,17 +1,42 @@
 spec_version: 2
-description: Deploy a LiteLLM proxy on a London Lab OpenShift cluster with selectable providers, optional Cisco AI Defense, and optional Galileo logging.
+description: Deploy a LiteLLM proxy on London Lab OCPAI-02 with selectable providers, optional Cisco AI Defense, and optional Galileo logging.
 instructions:
   text: |
-    Select the London Lab Torque agent for OCPAI-01 or OCPAI-02.
+    Select the Torque agent connected to London Lab OCPAI-02.
     Create the target namespace and a litellm-credentials Secret there before launch.
     Add only the credential keys required by the selected options.
     When enabling observability, supply a Galileo Cloud project ID.
 metadata:
   display-name: LiteLLM gateway - London Lab
+  self-service: [AI-Services]
+customization:
+  launch-form:
+    inputs:
+      - name: agent
+      - name: namespace
+      - name: providers
+      - name: ai_defense
+      - name: ai_defense_api_base
+        visible: '{% if inputs.ai_defense == "yes" %}true{% else %}false{% endif %}'
+      - name: observability
+      - name: galileo_project_id
+        visible: '{% if inputs.observability == "yes" %}true{% else %}false{% endif %}'
+      - name: galileo_log_stream_id
+        visible: '{% if inputs.observability == "yes" %}true{% else %}false{% endif %}'
+      - name: galileo_base_url
+        visible: '{% if inputs.observability == "yes" %}true{% else %}false{% endif %}'
+      - name: credentials_secret
+      - name: image_tag
+      - name: openai_model
+      - name: mistral_model
+      - name: anthropic_model
+      - name: local_kind
+      - name: local_model
+      - name: local_api_base
 inputs:
   agent:
     type: agent
-    description: Torque agent connected to OCPAI-01 or OCPAI-02 in the London Lab.
+    description: Torque agent connected to OCPAI-02 in the London Lab.
   namespace:
     type: string
     default: litellm

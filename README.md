@@ -1,13 +1,13 @@
 # LiteLLM for the London Lab
 
-This repository packages a Torque blueprint and Helm chart for a single-replica LiteLLM proxy on a London Lab OpenShift cluster. The launch form supports any combination of Mistral, OpenAI, Anthropic, and Local. Cisco AI Defense and Galileo observability are independent yes/no options.
+This repository packages a Torque blueprint and Helm chart for a single-replica LiteLLM proxy on London Lab OCPAI-02. The AI-Services launch form supports any combination of Mistral, OpenAI, Anthropic, and Local. Cisco AI Defense and Galileo observability are independent yes/no options.
 
 ## Files
 
 - `blueprints/litellm.yaml`: Torque blueprint.
 - `helm/litellm`: Helm chart referenced by the blueprint's `source.path`.
 
-The blueprint uses `source.store: stack-litellm-blueprint` and `source.path: helm/litellm`. Connect this Git repository to Torque under that store name, or change `store` to its registered name. Select the Torque agent for **OCPAI-01** or **OCPAI-02** at launch. The proxy itself does not need a GPU; cluster choice matters for reaching a local model service and the external APIs.
+The blueprint uses `source.store: stack-litellm-blueprint` and `source.path: helm/litellm`. Connect this Git repository to Torque under that store name, or change `store` to its registered name. Select the Torque agent for **OCPAI-02** at launch. The proxy itself does not need a GPU; cluster choice matters for reaching a local model service and the external APIs.
 
 The chart uses the pinned `ghcr.io/berriai/litellm-non_root:v1.108.0` image and a restricted container security context for OpenShift. The target namespace must contain the Secret below before launch. The Helm grain has `--create-namespace`, but create the namespace first if you need to create the Secret there.
 
