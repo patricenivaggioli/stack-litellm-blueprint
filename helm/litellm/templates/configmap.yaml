@@ -1,0 +1,75 @@
+{{- $name := (.Values.fullnameOverride | default (printf "%s-%s" .Release.Name .Chart.Name)) | trunc 63 | trimSuffix "-" -}}
+{{- $openai := eq (toString .Values.providers.openai.enabled) "true" -}}
+{{- $mistral := eq (toString .Values.providers.mistral.enabled) "true" -}}
+{{- $anthropic := eq (toString .Values.providers.anthropic.enabled) "true" -}}
+{{- $local := eq (toString .Values.providers.local.enabled) "true" -}}
+{{- $defense := eq (toString .Values.aiDefense.enabled) "true" -}}
+{{- $observability := eq (toString .Values.observability.enabled) "true" -}}
+{{- if not (or $openai $mistral $anthropic $local) -}}
+{{- fail "Select at least one provider" -}}
+{{- end -}}
+{{- if and $local (not (has .Values.providers.local.kind (list "ollama" "openai-compatible"))) -}}
+{{- fail "Local provider kind must be ollama or openai-compatible" -}}
+{{- end -}}
+{{- if and $local (not .Values.providers.local.apiBase) -}}
+{{- fail "Local provider requires apiBase" -}}
+{{- end -}}
+{{- if and $observability (not .Values.observability.galileoProjectId) -}}
+{{- fail "Galileo observability requires a Galileo project ID" -}}
+{{- end -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}-config
+  labels:
+    app.kubernetes.io/name: litellm
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  config.yaml: |
+    model_list:
+    {{- if $openai }}
+      - model_name: {{ printf "openai/%s" .Values.providers.openai.model | quote }}
+        litellm_params:
+          model: {{ printf "openai/%s" .Values.providers.openai.model | quote }}
+          api_key: os.environ/OPENAI_API_KEY
+    {{- end }}
+    {{- if $mistral }}
+      - model_name: {{ printf "mistral/%s" .Values.providers.mistral.model | quote }}
+        litellm_params:
+          model: {{ printf "mistral/%s" .Values.providers.mistral.model | quote }}
+          api_key: os.environ/MISTRAL_API_KEY
+    {{- end }}
+    {{- if $anthropic }}
+      - model_name: {{ printf "anthropic/%s" .Values.providers.anthropic.model | quote }}
+        litellm_params:
+          model: {{ printf "anthropic/%s" .Values.providers.anthropic.model | quote }}
+          api_key: os.environ/ANTHROPIC_API_KEY
+    {{- end }}
+    {{- if $local }}
+      - model_name: {{ printf "local/%s" .Values.providers.local.model | quote }}
+        litellm_params:
+          {{- if eq .Values.providers.local.kind "ollama" }}
+          model: {{ printf "ollama/%s" .Values.providers.local.model | quote }}
+          {{- else }}
+          model: {{ printf "custom_openai/%s" .Values.providers.local.model | quote }}
+          api_key: os.environ/LOCAL_API_KEY
+          {{- end }}
+          api_base: {{ .Values.providers.local.apiBase | quote }}
+    {{- end }}
+    {{- if $defense }}
+    guardrails:
+      - guardrail_name: cisco-ai-defense
+        litellm_params:
+          guardrail: cisco_ai_defense
+          inspection_type: chat
+          mode: [pre_call, post_call]
+          api_key: os.environ/CISCO_AI_DEFENSE_API_KEY
+          api_base: {{ .Values.aiDefense.apiBase | quote }}
+          default_on: true
+          on_flagged_action: block
+          fallback_on_error: block
+    {{- end }}
+    {{- if $observability }}
+    litellm_settings:
+      success_callback: [galileo]
+    {{- end }}

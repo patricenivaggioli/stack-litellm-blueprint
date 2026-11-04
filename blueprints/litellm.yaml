@@ -1,0 +1,122 @@
+spec_version: 2
+description: Deploy a LiteLLM proxy on a London Lab OpenShift cluster with selectable providers, optional Cisco AI Defense, and optional Galileo logging.
+instructions:
+  text: |
+    Select the London Lab Torque agent for OCPAI-01 or OCPAI-02.
+    Create the target namespace and a litellm-credentials Secret there before launch.
+    Add only the credential keys required by the selected options.
+    When enabling observability, supply a Galileo Cloud project ID.
+metadata:
+  display-name: LiteLLM gateway - London Lab
+inputs:
+  agent:
+    type: agent
+    description: Torque agent connected to OCPAI-01 or OCPAI-02 in the London Lab.
+  namespace:
+    type: string
+    default: litellm
+    description: Kubernetes namespace for this deployment; created if absent.
+    pattern: '^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$'
+  providers:
+    type: string
+    style: multi-select
+    default: '["Mistral"]'
+    allowed-values: [Mistral, OpenAI, Anthropic, Local]
+    description: One or more upstream model providers. At least one is required.
+  ai_defense:
+    type: string
+    style: radio
+    default: 'no'
+    allowed-values: ['yes', 'no']
+    description: Enable Cisco AI Defense for request and response inspection.
+  observability:
+    type: string
+    style: radio
+    default: 'no'
+    allowed-values: ['yes', 'no']
+    description: Send LiteLLM request logs to Galileo.
+  credentials_secret:
+    type: string
+    default: litellm-credentials
+    description: Existing Kubernetes Secret containing the master key and keys for selected providers.
+  image_tag:
+    type: string
+    default: v1.108.0
+    description: Pinned LiteLLM container image tag.
+  openai_model:
+    type: string
+    default: gpt-4o-mini
+    description: OpenAI model ID, used when OpenAI is selected.
+  mistral_model:
+    type: string
+    default: mistral-small-latest
+    description: Mistral model ID, used when Mistral is selected.
+  anthropic_model:
+    type: string
+    default: claude-sonnet-4-5
+    description: Anthropic model ID, used when Anthropic is selected.
+  local_kind:
+    type: string
+    style: radio
+    default: ollama
+    allowed-values: [ollama, openai-compatible]
+    description: Protocol used by the local model endpoint.
+  local_model:
+    type: string
+    default: llama3.2
+    description: Model ID served by the local endpoint.
+  local_api_base:
+    type: string
+    default: http://ollama:11434
+    description: Reachable local model API base URL; include /v1 for OpenAI-compatible servers.
+  ai_defense_api_base:
+    type: string
+    default: https://us.api.inspect.aidefense.security.cisco.com
+    description: Cisco AI Defense regional API base URL.
+  galileo_project_id:
+    type: string
+    default: ''
+    description: Galileo project ID, required when observability is enabled.
+  galileo_log_stream_id:
+    type: string
+    default: ''
+    description: Optional Galileo log stream ID.
+  galileo_base_url:
+    type: string
+    default: https://api.galileo.ai
+    description: Galileo Cloud API URL.
+outputs:
+  service_url:
+    value: 'http://litellm-{{ envId | downcase }}.{{ .inputs.namespace }}.svc.cluster.local:4000'
+    quick: true
+grains:
+  litellm:
+    kind: helm
+    spec:
+      source:
+        store: stack-litellm-blueprint
+        path: helm/litellm
+      agent:
+        name: '{{ .inputs.agent }}'
+      target-namespace: '{{ .inputs.namespace }}'
+      command-arguments: '--create-namespace --wait --timeout 10m'
+      inputs:
+        - fullnameOverride: 'litellm-{{ envId | downcase }}'
+        - image.tag: '{{ .inputs.image_tag }}'
+        - secretName: '{{ .inputs.credentials_secret }}'
+        - providers.openai.enabled: '{% if .inputs.providers contains "OpenAI" %}true{% else %}false{% endif %}'
+        - providers.openai.model: '{{ .inputs.openai_model }}'
+        - providers.mistral.enabled: '{% if .inputs.providers contains "Mistral" %}true{% else %}false{% endif %}'
+        - providers.mistral.model: '{{ .inputs.mistral_model }}'
+        - providers.anthropic.enabled: '{% if .inputs.providers contains "Anthropic" %}true{% else %}false{% endif %}'
+        - providers.anthropic.model: '{{ .inputs.anthropic_model }}'
+        - providers.local.enabled: '{% if .inputs.providers contains "Local" %}true{% else %}false{% endif %}'
+        - providers.local.kind: '{{ .inputs.local_kind }}'
+        - providers.local.model: '{{ .inputs.local_model }}'
+        - providers.local.apiBase: '{{ .inputs.local_api_base }}'
+        - aiDefense.enabled: '{% if .inputs.ai_defense == "yes" %}true{% else %}false{% endif %}'
+        - aiDefense.apiBase: '{{ .inputs.ai_defense_api_base }}'
+        - observability.enabled: '{% if .inputs.observability == "yes" %}true{% else %}false{% endif %}'
+        - observability.galileoProjectId: '{{ .inputs.galileo_project_id }}'
+        - observability.galileoLogStreamId: '{{ .inputs.galileo_log_stream_id }}'
+        - observability.galileoBaseUrl: '{{ .inputs.galileo_base_url }}'

@@ -1,0 +1,38 @@
+fullnameOverride: litellm
+image:
+  repository: ghcr.io/berriai/litellm-non_root
+  tag: v1.108.0
+  pullPolicy: IfNotPresent
+secretName: litellm-credentials
+providers:
+  openai:
+    enabled: false
+    model: gpt-4o-mini
+  mistral:
+    enabled: true
+    model: mistral-small-latest
+  anthropic:
+    enabled: false
+    model: claude-sonnet-4-5
+  local:
+    enabled: false
+    kind: ollama
+    model: llama3.2
+    apiBase: http://ollama:11434
+aiDefense:
+  enabled: false
+  apiBase: https://us.api.inspect.aidefense.security.cisco.com
+observability:
+  enabled: false
+  galileoProjectId: ""
+  galileoLogStreamId: ""
+  galileoBaseUrl: https://api.galileo.ai
+service:
+  port: 4000
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: "2"
+    memory: 2Gi

@@ -1,0 +1,124 @@
+{{- $name := (.Values.fullnameOverride | default (printf "%s-%s" .Release.Name .Chart.Name)) | trunc 63 | trimSuffix "-" -}}
+{{- $openai := eq (toString .Values.providers.openai.enabled) "true" -}}
+{{- $mistral := eq (toString .Values.providers.mistral.enabled) "true" -}}
+{{- $anthropic := eq (toString .Values.providers.anthropic.enabled) "true" -}}
+{{- $local := eq (toString .Values.providers.local.enabled) "true" -}}
+{{- $defense := eq (toString .Values.aiDefense.enabled) "true" -}}
+{{- $observability := eq (toString .Values.observability.enabled) "true" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    app.kubernetes.io/name: litellm
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: litellm
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+      labels:
+        app.kubernetes.io/name: litellm
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: litellm
+          image: {{ printf "%s:%s" .Values.image.repository .Values.image.tag | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          command: ["litellm"]
+          args: ["--config", "/app/config.yaml", "--port", "4000", "--host", "0.0.0.0"]
+          ports:
+            - name: http
+              containerPort: 4000
+          env:
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName | quote }}
+                  key: LITELLM_MASTER_KEY
+            {{- if $openai }}
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName | quote }}
+                  key: OPENAI_API_KEY
+            {{- end }}
+            {{- if $mistral }}
+            - name: MISTRAL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName | quote }}
+                  key: MISTRAL_API_KEY
+            {{- end }}
+            {{- if $anthropic }}
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName | quote }}
+                  key: ANTHROPIC_API_KEY
+            {{- end }}
+            {{- if and $local (eq .Values.providers.local.kind "openai-compatible") }}
+            - name: LOCAL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName | quote }}
+                  key: LOCAL_API_KEY
+            {{- end }}
+            {{- if $defense }}
+            - name: CISCO_AI_DEFENSE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName | quote }}
+                  key: CISCO_AI_DEFENSE_API_KEY
+            {{- end }}
+            {{- if $observability }}
+            - name: GALILEO_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName | quote }}
+                  key: GALILEO_API_KEY
+            - name: GALILEO_PROJECT_ID
+              value: {{ .Values.observability.galileoProjectId | quote }}
+            - name: GALILEO_BASE_URL
+              value: {{ .Values.observability.galileoBaseUrl | quote }}
+            {{- if .Values.observability.galileoLogStreamId }}
+            - name: GALILEO_LOG_STREAM_ID
+              value: {{ .Values.observability.galileoLogStreamId | quote }}
+            {{- end }}
+            {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+              readOnly: true
+          resources:
+{{ toYaml .Values.resources | indent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /health/readiness
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $name }}-config
