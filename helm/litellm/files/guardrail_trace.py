@@ -17,7 +17,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from litellm._logging import verbose_proxy_logger
@@ -231,7 +231,8 @@ def _append_guardrail_spans(trace: dict[str, object], record: dict[str, Any]) ->
     spans = trace["spans"]
     if not isinstance(spans, list):
         return trace
-    for event in record.get("guardrail_events") or []:
+    events = record.get("guardrail_events") or []
+    for event in events:
         action = str(event["action"])
         direction = str(event["direction"])
         status = 503 if action == "error" else 400 if action == "block" else 200
@@ -252,6 +253,32 @@ def _append_guardrail_spans(trace: dict[str, object], record: dict[str, Any]) ->
                 "metrics": {"duration_ns": event["duration_ns"]},
                 "tags": ["cisco-ai-defense", action, direction],
             }
+        )
+    # The native Galileo span starts at the LiteLLM request start and covers
+    # both guardrails. Place it in the interval when the model can run so the
+    # trace reads input inspection -> model -> output inspection.
+    model_span = next((span for span in spans if span.get("type") == "llm"), None)
+    if model_span is not None:
+        input_ends = [
+            datetime.fromisoformat(str(event["created_at"]).replace("Z", "+00:00"))
+            + timedelta(microseconds=int(event["duration_ns"]) / 1000)
+            for event in events
+            if event["direction"] == "input"
+        ]
+        output_starts = [
+            datetime.fromisoformat(str(event["created_at"]).replace("Z", "+00:00"))
+            for event in events
+            if event["direction"] == "output"
+        ]
+        model_start = datetime.fromisoformat(str(model_span["created_at"]).replace("Z", "+00:00"))
+        if input_ends:
+            model_start = max(model_start, max(input_ends))
+            model_span["created_at"] = _utc_iso(model_start)
+        trace_start = datetime.fromisoformat(str(trace["created_at"]).replace("Z", "+00:00"))
+        trace_end = trace_start + timedelta(milliseconds=int(record.get("latency_ms") or 0))
+        model_end = min(output_starts) if output_starts else trace_end
+        model_span["metrics"]["duration_ns"] = max(
+            0, int((model_end - model_start).total_seconds() * 1_000_000_000)
         )
     spans.sort(key=lambda span: str(span.get("created_at", "")))
     return trace
