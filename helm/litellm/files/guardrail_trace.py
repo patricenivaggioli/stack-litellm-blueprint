@@ -1,8 +1,8 @@
-"""Send Cisco AI Defense decisions to Galileo without changing enforcement.
+"""Group LiteLLM and Cisco AI Defense spans in one Galileo trace.
 
-This adapter targets the Cisco guardrail in the pinned LiteLLM v1.108.0 image.
-It emits one standalone Galileo trace per inspection, linked to LiteLLM logs by
-call_id. No prompt, model response, Cisco explanation, or credential is sent.
+This adapter targets the pinned LiteLLM v1.108.0 image. Successful model calls
+use a custom Galileo callback; pre-call blocks have no model span and are sent
+directly by the guardrail. Guardrail spans never contain prompt or response text.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from litellm._logging import verbose_proxy_logger
+from litellm.integrations.galileo import GALILEO_MAX_IN_MEMORY_RECORDS, GalileoObserve
 from litellm.proxy.guardrails.guardrail_hooks.cisco_ai_defense.cisco_ai_defense import (
     CiscoAIDefenseGuardrail,
 )
@@ -159,11 +160,190 @@ def _enqueue(payload: dict[str, object], event_id: str, action: str) -> None:
         verbose_proxy_logger.error("GALILEO_GUARDRAIL_TRACE_DROPPED event_id=%s queue_full", event_id)
 
 
+def _utc_datetime(value: object) -> datetime:
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(float(value), tz=timezone.utc)
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=datetime.now().astimezone().tzinfo)
+        return value.astimezone(timezone.utc)
+    return datetime.now(timezone.utc)
+
+
+def _utc_iso(value: object) -> str:
+    return _utc_datetime(value).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def _guardrail_events(standard_log: dict[str, Any]) -> list[dict[str, object]]:
+    """Keep only Cisco decision metadata; the full response can contain PII."""
+    events: list[dict[str, object]] = []
+    for entry in standard_log.get("guardrail_information") or []:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("guardrail_provider") != "cisco_ai_defense" and entry.get("guardrail_name") != "cisco-ai-defense":
+            continue
+        response = entry.get("guardrail_response") or {}
+        if not isinstance(response, dict):
+            response = {}
+        mode = str(entry.get("guardrail_mode") or "")
+        direction = "input" if mode in ("pre_call", "during_call") else "output" if mode == "post_call" else "unknown"
+        action = str(response.get("action") or ("error" if entry.get("guardrail_status") == "guardrail_failed_to_respond" else "allow"))
+        classifications = response.get("classifications") or []
+        rules = response.get("rules") or []
+        rule_names = sorted(
+            {
+                str(rule["rule_name"])
+                for rule in rules
+                if isinstance(rule, dict)
+                and rule.get("rule_name")
+                and rule.get("classification") not in (None, "NONE_VIOLATION")
+            }
+        )
+        events.append(
+            {
+                "direction": direction,
+                "action": action,
+                "is_safe": response.get("is_safe"),
+                "classifications": [str(x) for x in classifications] if isinstance(classifications, list) else [],
+                "rule_violations": rule_names,
+                "severity": response.get("severity"),
+                "event_id": str(response.get("event_id") or ""),
+                "created_at": _utc_iso(entry.get("start_time")),
+                "duration_ns": max(0, int(float(entry.get("duration") or 0) * 1_000_000_000)),
+            }
+        )
+    return events
+
+
+def _append_guardrail_spans(trace: dict[str, object], record: dict[str, Any]) -> dict[str, object]:
+    trace_id = str(trace["id"])
+    spans = trace["spans"]
+    if not isinstance(spans, list):
+        return trace
+    for event in record.get("guardrail_events") or []:
+        action = str(event["action"])
+        direction = str(event["direction"])
+        status = 503 if action == "error" else 400 if action == "block" else 200
+        decision = {key: event[key] for key in (
+            "action", "is_safe", "classifications", "rule_violations", "severity", "event_id"
+        )}
+        spans.append(
+            {
+                "type": "tool",
+                "id": str(uuid.uuid4()),
+                "trace_id": trace_id,
+                "parent_id": trace_id,
+                "name": f"Cisco AI Defense {direction}",
+                "created_at": event["created_at"],
+                "input": json.dumps({"call_id": record.get("call_id", ""), "direction": direction}, separators=(",", ":")),
+                "output": json.dumps(decision, separators=(",", ":")),
+                "status_code": status,
+                "metrics": {"duration_ns": event["duration_ns"]},
+                "tags": ["cisco-ai-defense", action, direction],
+            }
+        )
+    spans.sort(key=lambda span: str(span.get("created_at", "")))
+    return trace
+
+
+class CorrelatedGalileoObserve(GalileoObserve):
+    """Preserve Galileo's LLM trace and add Cisco spans to that same trace."""
+
+    @staticmethod
+    def _record_to_v2_trace(record: dict[str, Any]) -> dict[str, object]:
+        trace = GalileoObserve._record_to_v2_trace(record)
+        return _append_guardrail_spans(trace, record)
+
+    async def _async_log_success_event_impl(
+        self, kwargs: dict[str, Any], response_obj: object, start_time: object, end_time: object
+    ) -> None:
+        if not self._is_configured():
+            return
+        standard_log = kwargs.get("standard_logging_object")
+        if not isinstance(standard_log, dict):
+            return
+        input_text, output_text, messages = self._get_galileo_input_output_content(
+            kwargs=kwargs, response_obj=response_obj
+        )
+        start = _utc_datetime(standard_log.get("startTime") or start_time)
+        end = _utc_datetime(standard_log.get("endTime") or end_time)
+        record: dict[str, Any] = {
+            "latency_ms": max(0, int((end - start).total_seconds() * 1000)),
+            "status_code": 200,
+            "input_text": input_text,
+            "output_text": output_text,
+            "node_type": str(standard_log.get("call_type") or kwargs.get("call_type") or "litellm"),
+            "model": str(standard_log.get("model") or kwargs.get("model") or "-"),
+            "num_input_tokens": int(standard_log.get("prompt_tokens") or 0),
+            "num_output_tokens": int(standard_log.get("completion_tokens") or 0),
+            "num_total_tokens": int(standard_log.get("total_tokens") or 0),
+            "cost": standard_log.get("response_cost"),
+            "created_at": _utc_iso(start),
+            "call_id": str(standard_log.get("id") or ""),
+            "guardrail_events": _guardrail_events(standard_log),
+        }
+        if isinstance(messages, dict):
+            messages = messages.get("messages")
+        if isinstance(messages, list) and messages:
+            record["messages"] = messages
+        self.in_memory_records.append(record)
+        if len(self.in_memory_records) > GALILEO_MAX_IN_MEMORY_RECORDS:
+            dropped = len(self.in_memory_records) - GALILEO_MAX_IN_MEMORY_RECORDS
+            self.in_memory_records = self.in_memory_records[-GALILEO_MAX_IN_MEMORY_RECORDS:]
+            verbose_proxy_logger.warning("Galileo guardrail logger dropped %s buffered record(s)", dropped)
+        if len(self.in_memory_records) >= self.batch_size:
+            await self.flush_in_memory_records()
+
+    async def async_log_failure_event(
+        self, kwargs: dict[str, Any], response_obj: object, start_time: object, end_time: object
+    ) -> None:
+        """Log failures after an LLM call; input blocks are emitted by the guardrail."""
+        try:
+            if not self._is_configured():
+                return
+            standard_log = kwargs.get("standard_logging_object")
+            if not isinstance(standard_log, dict):
+                return
+            events = _guardrail_events(standard_log)
+            if not events or any(e["direction"] == "input" and e["action"] in ("block", "error") for e in events):
+                return
+            start = _utc_datetime(standard_log.get("startTime") or start_time)
+            end = _utc_datetime(standard_log.get("endTime") or end_time)
+            blocked = any(e["action"] == "block" for e in events)
+            record = {
+                "latency_ms": max(0, int((end - start).total_seconds() * 1000)),
+                "status_code": 400 if blocked else 500,
+                "input_text": json.dumps({"call_id": standard_log.get("id"), "model": standard_log.get("model")}),
+                "output_text": "Blocked by Cisco AI Defense" if blocked else "LLM request failed",
+                "node_type": str(standard_log.get("call_type") or "litellm"),
+                "model": str(standard_log.get("model") or "-"),
+                "num_input_tokens": int(standard_log.get("prompt_tokens") or 0),
+                "num_output_tokens": int(standard_log.get("completion_tokens") or 0),
+                "num_total_tokens": int(standard_log.get("total_tokens") or 0),
+                "cost": standard_log.get("response_cost"),
+                "created_at": _utc_iso(start),
+                "call_id": str(standard_log.get("id") or ""),
+                "guardrail_events": events,
+            }
+            self.in_memory_records.append(record)
+            await self.flush_in_memory_records()
+        except Exception as exc:
+            verbose_proxy_logger.error("GALILEO_CORRELATED_FAILURE_TRACE_FAILED error_type=%s", type(exc).__name__)
+
+
+correlated_galileo = CorrelatedGalileoObserve()
+
+
 class TracedCiscoAIDefenseGuardrail(CiscoAIDefenseGuardrail):
     """Retain Cisco's verdict handling and mirror sanitized decisions to Galileo."""
 
     def _log_decision(self, context: Any, verdict: Any, duration_ms: float, request_data: dict) -> None:
         super()._log_decision(context, verdict, duration_ms, request_data)
+        # Successful calls are exported once by CorrelatedGalileoObserve with
+        # input, LLM, and output spans under the same trace. A pre-call block
+        # has no LLM success callback, so export its guardrail-only trace here.
+        if context.direction != "input" or verdict.action != "block":
+            return
         try:
             rules = sorted(
                 {
@@ -209,6 +389,14 @@ class TracedCiscoAIDefenseGuardrail(CiscoAIDefenseGuardrail):
         surface: str = "chat",
         direction: str = "input",
     ) -> dict[str, object]:
+        if direction != "input" or self.fallback_on_error != "block":
+            return super()._handle_api_error(
+                error,
+                request_data=request_data,
+                start_time=start_time,
+                surface=surface,
+                direction=direction,
+            )
         try:
             duration_ms = (
                 max(0.0, (datetime.now(start_time.tzinfo) - start_time).total_seconds() * 1000)

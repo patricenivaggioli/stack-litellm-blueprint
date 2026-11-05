@@ -75,7 +75,11 @@ data:
     {{- end }}
     {{- if $observability }}
     litellm_settings:
+      {{- if $defense }}
+      callbacks: guardrail_trace.correlated_galileo
+      {{- else }}
       success_callback: [galileo]
+      {{- end }}
     {{- end }}
   {{- if and $defense $observability }}
   guardrail_trace.py: |
