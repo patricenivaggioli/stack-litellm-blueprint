@@ -1,12 +1,24 @@
-# LiteLLM for the London Lab
+# AI gateway blueprints for the London Lab
 
 This repository packages a Torque blueprint and Helm chart for a single-replica LiteLLM proxy on London Lab OCPAI-02. The AI-Services launch form supports any combination of Mistral, OpenAI, Anthropic, and Local. Cisco AI Defense and Galileo observability are independent yes/no options.
+
+It also provides a separate blueprint for a managed Cisco AI Defense MCP Gateway connection. That service sits between an MCP client such as OpenCode and MCP servers; it does not replace the LiteLLM model proxy.
 
 ## Files
 
 - `blueprints/litellm.yaml`: Torque blueprint.
 - `helm/litellm`: Helm chart referenced by the blueprint's `source.path`.
 - `scripts/get-route-url.sh`: Reads the admitted OpenShift Route host for the Torque output.
+- `blueprints/ai-defense-mcp-gateway.yaml`: Provisions an AI Defense MCPGateway connection protected by Duo.
+- `scripts/manage-ai-defense-mcp-gateway.py`: Creates, queries, and deletes only the connection owned by that Torque environment.
+
+## AI Defense MCP Gateway service
+
+Launch the `ai-defense-mcp-gateway` blueprint in AI-Services after registering the intended upstream MCP servers in AI Defense and configuring a Duo MCP OAuth 2.1 application as an AI Defense IdP. Supply their server IDs, the Duo IdP configuration ID, and an AI Defense **tenant Management API key** as launch inputs. The LiteLLM Inspection API key cannot manage MCP connections. The optional connector ID is for servers reachable only through an AI Defense on-prem connector.
+
+The blueprint creates an `MCPGateway` resource connection with inbound OAuth protection and reports its connection ID and HTTPS proxy URL. The resource uses a unique Torque environment name, and termination removes that connection only. It does not create the upstream MCP servers, Duo application, or runtime policy. **Attach and enable an MCP runtime policy and Duo group-to-tool rules before configuring OpenCode to use the URL.** Test both allowed and blocked tool calls. Cisco currently documents the MCP registry and resource-connection management APIs as beta; validate an actual launch against your tenant before using this service for production traffic.
+
+Sources: [AI Defense resource connection API](https://developer.cisco.com/docs/ai-defense-management/create-resource-connection/), [Duo with AI Defense](https://duo.com/docs/aidefense), [Torque shell grain](https://docs.qtorque.io/blueprint-designer-guide/blueprints/shell-grain).
 
 The blueprint uses `source.store: stack-litellm-blueprint` and `source.path: helm/litellm`. Connect this Git repository to Torque under that store name, or change `store` to its registered name. Select the Torque agent for **OCPAI-02** at launch. The proxy itself does not need a GPU; cluster choice matters for reaching a local model service and the external APIs.
 

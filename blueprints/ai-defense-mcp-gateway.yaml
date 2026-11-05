@@ -1,0 +1,75 @@
+spec_version: 2
+description: Provision a Cisco AI Defense MCP Gateway connection for registered MCP servers, protected by Duo OAuth 2.1.
+
+instructions:
+  text: |
+    This service creates a managed AI Defense MCPGateway connection. It does not
+    install a gateway pod in Kubernetes. Register the upstream MCP server(s) in
+    AI Defense and configure Duo as an AI Defense IdP before launching.
+    Supply an AI Defense *management* API key, not an Inspection API key.
+    After launch, attach and enable an MCP runtime policy for this connection
+    in AI Defense, and configure Duo group-to-tool authorization. Test an
+    allowed and a blocked tool call before adding the proxy URL to OpenCode.
+    Ending this environment deletes only its MCPGateway connection; it leaves
+    registered MCP servers, Duo configuration, and policies untouched.
+
+inputs:
+  agent:
+    type: agent
+    description: Torque agent with outbound access to the AI Defense Management API.
+  management_api_key:
+    type: string
+    sensitive: true
+    description: AI Defense tenant Management API key (X-Cisco-AI-Defense-Tenant-API-Key).
+  mcp_server_ids:
+    type: string
+    description: Comma-separated IDs of MCP servers already registered in AI Defense.
+  duo_idp_id:
+    type: string
+    description: AI Defense IdP configuration ID for the Duo MCP OAuth 2.1 application.
+  connector_id:
+    type: string
+    default: ''
+    description: Optional AI Defense on-prem connector ID for private MCP servers.
+  management_api_base:
+    type: string
+    default: https://api.security.cisco.com/api/ai-defense/v1
+    description: AI Defense Management API base URL for this tenant.
+
+outputs:
+  connection_id:
+    value: '{{ .grains.mcp_gateway.activities.deploy.commands.provision.outputs.connection_id }}'
+    quick: true
+  proxy_url:
+    value: '{{ .grains.mcp_gateway.activities.deploy.commands.provision.outputs.proxy_url }}'
+    kind: link
+    quick: true
+
+grains:
+  mcp_gateway:
+    kind: shell
+    spec:
+      agent:
+        name: '{{ .inputs.agent }}'
+      files:
+        - source: stack-litellm-blueprint
+          path: scripts/manage-ai-defense-mcp-gateway.py
+      env-vars:
+        - AI_DEFENSE_MANAGEMENT_KEY: '{{ .inputs.management_api_key }}'
+        - AI_DEFENSE_API_BASE: '{{ .inputs.management_api_base }}'
+        - MCP_SERVER_IDS: '{{ .inputs.mcp_server_ids }}'
+        - DUO_IDP_ID: '{{ .inputs.duo_idp_id }}'
+        - AI_DEFENSE_CONNECTOR_ID: '{{ .inputs.connector_id }}'
+        - MCP_CONNECTION_NAME: 'stack-mcp-{{ envId | downcase }}'
+      activities:
+        deploy:
+          commands:
+            - name: provision
+              command: 'out=$(mktemp); python3 manage-ai-defense-mcp-gateway.py deploy > "$out" && . "$out"; status=$?; rm -f "$out"; exit "$status"'
+              outputs:
+                - connection_id
+                - proxy_url
+        destroy:
+          commands:
+            - name: remove_connection
+              command: 'python3 manage-ai-defense-mcp-gateway.py destroy'
