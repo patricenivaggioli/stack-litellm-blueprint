@@ -174,6 +174,13 @@ def _utc_iso(value: object) -> str:
     return _utc_datetime(value).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
+def _call_id(value: object) -> str:
+    try:
+        return str(uuid.UUID(str(value)))
+    except (TypeError, ValueError, AttributeError):
+        return ""
+
+
 def _guardrail_events(standard_log: dict[str, Any]) -> list[dict[str, object]]:
     """Keep only Cisco decision metadata; the full response can contain PII."""
     events: list[dict[str, object]] = []
@@ -185,7 +192,8 @@ def _guardrail_events(standard_log: dict[str, Any]) -> list[dict[str, object]]:
         response = entry.get("guardrail_response") or {}
         if not isinstance(response, dict):
             response = {}
-        mode = str(entry.get("guardrail_mode") or "")
+        raw_mode = entry.get("guardrail_mode")
+        mode = str(getattr(raw_mode, "value", raw_mode) or "").rsplit(".", 1)[-1]
         direction = "input" if mode in ("pre_call", "during_call") else "output" if mode == "post_call" else "unknown"
         action = str(response.get("action") or ("error" if entry.get("guardrail_status") == "guardrail_failed_to_respond" else "allow"))
         classifications = response.get("classifications") or []
@@ -208,6 +216,7 @@ def _guardrail_events(standard_log: dict[str, Any]) -> list[dict[str, object]]:
                 "rule_violations": rule_names,
                 "severity": response.get("severity"),
                 "event_id": str(response.get("event_id") or ""),
+                "call_id": _call_id(response.get("client_transaction_id")),
                 "created_at": _utc_iso(entry.get("start_time")),
                 "duration_ns": max(0, int(float(entry.get("duration") or 0) * 1_000_000_000)),
             }
@@ -235,7 +244,7 @@ def _append_guardrail_spans(trace: dict[str, object], record: dict[str, Any]) ->
                 "parent_id": trace_id,
                 "name": f"Cisco AI Defense {direction}",
                 "created_at": event["created_at"],
-                "input": json.dumps({"call_id": record.get("call_id", ""), "direction": direction}, separators=(",", ":")),
+                "input": json.dumps({"call_id": event.get("call_id") or record.get("call_id", ""), "direction": direction}, separators=(",", ":")),
                 "output": json.dumps(decision, separators=(",", ":")),
                 "status_code": status,
                 "metrics": {"duration_ns": event["duration_ns"]},
@@ -267,6 +276,8 @@ class CorrelatedGalileoObserve(GalileoObserve):
         )
         start = _utc_datetime(standard_log.get("startTime") or start_time)
         end = _utc_datetime(standard_log.get("endTime") or end_time)
+        events = _guardrail_events(standard_log)
+        call_id = next((str(e["call_id"]) for e in events if e.get("call_id")), "") or _call_id(standard_log.get("id"))
         record: dict[str, Any] = {
             "latency_ms": max(0, int((end - start).total_seconds() * 1000)),
             "status_code": 200,
@@ -279,8 +290,8 @@ class CorrelatedGalileoObserve(GalileoObserve):
             "num_total_tokens": int(standard_log.get("total_tokens") or 0),
             "cost": standard_log.get("response_cost"),
             "created_at": _utc_iso(start),
-            "call_id": str(standard_log.get("id") or ""),
-            "guardrail_events": _guardrail_events(standard_log),
+            "call_id": call_id,
+            "guardrail_events": events,
         }
         if isinstance(messages, dict):
             messages = messages.get("messages")
@@ -307,13 +318,14 @@ class CorrelatedGalileoObserve(GalileoObserve):
             events = _guardrail_events(standard_log)
             if not events or any(e["direction"] == "input" and e["action"] in ("block", "error") for e in events):
                 return
+            call_id = next((str(e["call_id"]) for e in events if e.get("call_id")), "") or _call_id(standard_log.get("id"))
             start = _utc_datetime(standard_log.get("startTime") or start_time)
             end = _utc_datetime(standard_log.get("endTime") or end_time)
             blocked = any(e["action"] == "block" for e in events)
             record = {
                 "latency_ms": max(0, int((end - start).total_seconds() * 1000)),
                 "status_code": 400 if blocked else 500,
-                "input_text": json.dumps({"call_id": standard_log.get("id"), "model": standard_log.get("model")}),
+                "input_text": json.dumps({"call_id": call_id, "model": standard_log.get("model")}),
                 "output_text": "Blocked by Cisco AI Defense" if blocked else "LLM request failed",
                 "node_type": str(standard_log.get("call_type") or "litellm"),
                 "model": str(standard_log.get("model") or "-"),
@@ -322,7 +334,7 @@ class CorrelatedGalileoObserve(GalileoObserve):
                 "num_total_tokens": int(standard_log.get("total_tokens") or 0),
                 "cost": standard_log.get("response_cost"),
                 "created_at": _utc_iso(start),
-                "call_id": str(standard_log.get("id") or ""),
+                "call_id": call_id,
                 "guardrail_events": events,
             }
             self.in_memory_records.append(record)
