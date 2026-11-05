@@ -7,9 +7,11 @@ directly by the guardrail. Guardrail spans never contain prompt or response text
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import queue
+import re
 import threading
 import time
 import urllib.error
@@ -258,10 +260,64 @@ def _append_guardrail_spans(trace: dict[str, object], record: dict[str, Any]) ->
 class CorrelatedGalileoObserve(GalileoObserve):
     """Preserve Galileo's LLM trace and add Cisco spans to that same trace."""
 
+    def __init__(self) -> None:
+        super().__init__()
+        self._flush_lock = asyncio.Lock()
+
     @staticmethod
     def _record_to_v2_trace(record: dict[str, Any]) -> dict[str, object]:
         trace = GalileoObserve._record_to_v2_trace(record)
         return _append_guardrail_spans(trace, record)
+
+    async def flush_in_memory_records(self) -> None:
+        """Quarantine a rejected trace instead of blocking all later exports."""
+        async with self._flush_lock:
+            while self.in_memory_records:
+                sent_records = list(self.in_memory_records)
+                ingest_request = self._get_ingest_request()
+                if ingest_request is None or not await self._ensure_headers():
+                    verbose_proxy_logger.error("GALILEO_TRACE_EXPORT_FAILED missing Galileo configuration")
+                    return
+                url, payload = ingest_request
+                try:
+                    response = await self.async_httpx_handler.post(
+                        url=url, headers=self.headers, json=payload
+                    )
+                    status = response.status_code
+                    error_body = response.text if status == 422 else ""
+                except Exception as exc:
+                    failed_response = getattr(exc, "response", None)
+                    status = getattr(failed_response, "status_code", None)
+                    error_body = failed_response.text if status == 422 else ""
+                    if status != 422:
+                        verbose_proxy_logger.error(
+                            "GALILEO_TRACE_EXPORT_FAILED status=%s error_type=%s buffered=%s",
+                            status, type(exc).__name__, len(self.in_memory_records),
+                        )
+                        return
+                if 200 <= status < 300:
+                    sent_ids = {id(record) for record in sent_records}
+                    self.in_memory_records = [
+                        record for record in self.in_memory_records if id(record) not in sent_ids
+                    ]
+                    continue
+                if status != 422:
+                    verbose_proxy_logger.error(
+                        "GALILEO_TRACE_EXPORT_FAILED status=%s buffered=%s",
+                        status, len(self.in_memory_records),
+                    )
+                    return
+                match = re.search(r"trace (\d+)", error_body)
+                index = int(match.group(1)) if match else 0
+                index = index if index < len(sent_records) else 0
+                rejected = sent_records[index]
+                self.in_memory_records = [
+                    record for record in self.in_memory_records if record is not rejected
+                ]
+                verbose_proxy_logger.error(
+                    "GALILEO_TRACE_REJECTED status=422 call_id=%s buffered=%s",
+                    rejected.get("call_id", ""), len(self.in_memory_records),
+                )
 
     async def _async_log_success_event_impl(
         self, kwargs: dict[str, Any], response_obj: object, start_time: object, end_time: object
@@ -278,6 +334,12 @@ class CorrelatedGalileoObserve(GalileoObserve):
         end = _utc_datetime(standard_log.get("endTime") or end_time)
         events = _guardrail_events(standard_log)
         call_id = next((str(e["call_id"]) for e in events if e.get("call_id")), "") or _call_id(standard_log.get("id"))
+        if not output_text or not output_text.strip():
+            output_text = "Assistant output unavailable to Galileo callback"
+            verbose_proxy_logger.warning(
+                "GALILEO_EMPTY_MODEL_OUTPUT call_id=%s response_type=%s",
+                call_id, type(response_obj).__name__,
+            )
         record: dict[str, Any] = {
             "latency_ms": max(0, int((end - start).total_seconds() * 1000)),
             "status_code": 200,
