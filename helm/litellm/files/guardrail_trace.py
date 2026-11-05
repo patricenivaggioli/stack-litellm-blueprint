@@ -32,6 +32,29 @@ _WORKER_LOCK = threading.Lock()
 _WORKER: threading.Thread | None = None
 
 
+def _session_external_id(data: dict[str, Any] | None) -> str:
+    """Read the explicit OpenCode session header from LiteLLM request context."""
+    if not isinstance(data, dict):
+        return ""
+    contexts = [data, data.get("litellm_params")]
+    for context in contexts:
+        if not isinstance(context, dict):
+            continue
+        sources = [context, context.get("proxy_server_request"), context.get("metadata")]
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            headers = source.get("headers")
+            if not isinstance(headers, dict):
+                continue
+            for name, value in headers.items():
+                if str(name).lower() != "x-opencode-session-id":
+                    continue
+                if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9._:-]{1,160}", value):
+                    return "opencode:" + value
+    return ""
+
+
 def _worker() -> None:
     while True:
         payload, event_id, action = _EVENTS.get()
@@ -151,6 +174,9 @@ def _trace_payload(
     stream_id = os.environ.get("GALILEO_LOG_STREAM_ID")
     if stream_id:
         payload["log_stream_id"] = stream_id
+    session_external_id = _session_external_id(request_data)
+    if session_external_id:
+        payload["session_external_id"] = session_external_id
     return payload
 
 
@@ -300,12 +326,21 @@ class CorrelatedGalileoObserve(GalileoObserve):
         """Quarantine a rejected trace instead of blocking all later exports."""
         async with self._flush_lock:
             while self.in_memory_records:
-                sent_records = list(self.in_memory_records)
-                ingest_request = self._get_ingest_request()
-                if ingest_request is None or not await self._ensure_headers():
+                # Galileo accepts one session_external_id per ingest request.
+                # Send one record at a time so concurrent OpenCode sessions
+                # cannot be grouped into each other's sessions.
+                sent_records = [self.in_memory_records[0]]
+                if not self.base_url or not self.project_id or not await self._ensure_headers():
                     verbose_proxy_logger.error("GALILEO_TRACE_EXPORT_FAILED missing Galileo configuration")
                     return
-                url, payload = ingest_request
+                if self.use_v2_api:
+                    url = f"{self.base_url}/ingest/traces/{self.project_id}"
+                else:
+                    url = f"{self.base_url}/v2/projects/{self.project_id}/traces"
+                payload = self._build_traces_payload(sent_records)
+                session_external_id = sent_records[0].get("session_external_id")
+                if session_external_id:
+                    payload["session_external_id"] = session_external_id
                 try:
                     response = await self.async_httpx_handler.post(
                         url=url, headers=self.headers, json=payload
@@ -380,6 +415,7 @@ class CorrelatedGalileoObserve(GalileoObserve):
             "cost": standard_log.get("response_cost"),
             "created_at": _utc_iso(start),
             "call_id": call_id,
+            "session_external_id": _session_external_id(kwargs),
             "guardrail_events": events,
         }
         if isinstance(messages, dict):
@@ -424,6 +460,7 @@ class CorrelatedGalileoObserve(GalileoObserve):
                 "cost": standard_log.get("response_cost"),
                 "created_at": _utc_iso(start),
                 "call_id": call_id,
+                "session_external_id": _session_external_id(kwargs),
                 "guardrail_events": events,
             }
             self.in_memory_records.append(record)
