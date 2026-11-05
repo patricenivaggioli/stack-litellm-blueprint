@@ -237,7 +237,9 @@ def _call_id(value: object) -> str:
         return ""
 
 
-def _guardrail_events(standard_log: dict[str, Any]) -> list[dict[str, object]]:
+def _guardrail_events(
+    standard_log: dict[str, Any], *, opencode_session: bool = False
+) -> list[dict[str, object]]:
     """Keep only Cisco decision metadata; the full response can contain PII."""
     events: list[dict[str, object]] = []
     for entry in standard_log.get("guardrail_information") or []:
@@ -277,6 +279,10 @@ def _guardrail_events(standard_log: dict[str, Any]) -> list[dict[str, object]]:
                 "duration_ns": max(0, int(float(entry.get("duration") or 0) * 1_000_000_000)),
             }
         )
+    input_events = [event for event in events if event["direction"] == "input"]
+    if opencode_session and len(input_events) >= 2:
+        input_events[0]["scan_scope"] = "untrusted messages"
+        input_events[-1]["scan_scope"] = "full conversation"
     return events
 
 
@@ -299,7 +305,8 @@ def _append_guardrail_spans(trace: dict[str, object], record: dict[str, Any]) ->
                 "id": str(uuid.uuid4()),
                 "trace_id": trace_id,
                 "parent_id": trace_id,
-                "name": f"Cisco AI Defense {direction}",
+                "name": f"Cisco AI Defense {direction}"
+                + (f" ({event['scan_scope']})" if event.get("scan_scope") else ""),
                 "created_at": event["created_at"],
                 "input": json.dumps({"call_id": event.get("call_id") or record.get("call_id", ""), "direction": direction}, separators=(",", ":")),
                 "output": json.dumps(decision, separators=(",", ":")),
@@ -422,7 +429,7 @@ class CorrelatedGalileoObserve(GalileoObserve):
         )
         start = _utc_datetime(standard_log.get("startTime") or start_time)
         end = _utc_datetime(standard_log.get("endTime") or end_time)
-        events = _guardrail_events(standard_log)
+        events = _guardrail_events(standard_log, opencode_session=bool(_session_external_id(kwargs)))
         call_id = next((str(e["call_id"]) for e in events if e.get("call_id")), "") or _call_id(standard_log.get("id"))
         if not output_text or not output_text.strip():
             output_text = "Assistant output unavailable to Galileo callback"
@@ -472,7 +479,7 @@ class CorrelatedGalileoObserve(GalileoObserve):
             standard_log = kwargs.get("standard_logging_object")
             if not isinstance(standard_log, dict):
                 return
-            events = _guardrail_events(standard_log)
+            events = _guardrail_events(standard_log, opencode_session=bool(_session_external_id(kwargs)))
             if not events or any(e["direction"] == "input" and e["action"] in ("block", "error") for e in events):
                 return
             call_id = next((str(e["call_id"]) for e in events if e.get("call_id")), "") or _call_id(standard_log.get("id"))
@@ -554,16 +561,23 @@ class TracedCiscoAIDefenseGuardrail(CiscoAIDefenseGuardrail):
         response_obj: object = None,
     ) -> dict[str, object]:
         self._reject_blocked_session(request_data, direction)
-        # OpenCode sends a large trusted system prompt alongside short user
-        # requests. Inspect the untrusted conversation so it cannot dilute a
-        # policy verdict on the user's message.
-        if _session_external_id(request_data):
+        # OpenCode sends a large system prompt alongside short user requests.
+        # Check untrusted messages first, then retain the full inspection so a
+        # caller-supplied session header cannot remove system-message coverage.
+        if direction == "input" and _session_external_id(request_data):
             untrusted = [
                 message for message in messages
                 if isinstance(message, dict) and str(message.get("role", "")).lower() != "system"
             ]
-            if untrusted:
-                messages = untrusted
+            if untrusted and len(untrusted) < len(messages):
+                await super()._inspect_chat(
+                    messages=untrusted,
+                    request_data=request_data,
+                    user_api_key_dict=user_api_key_dict,
+                    direction=direction,
+                    response_obj=response_obj,
+                )
+                self._reject_blocked_session(request_data, direction)
         result = await super()._inspect_chat(
             messages=messages,
             request_data=request_data,
