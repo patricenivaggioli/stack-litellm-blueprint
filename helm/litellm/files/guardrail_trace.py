@@ -20,6 +20,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from fastapi import HTTPException
 from litellm._logging import verbose_proxy_logger
 from litellm.integrations.galileo import GALILEO_MAX_IN_MEMORY_RECORDS, GalileoObserve
 from litellm.proxy.guardrails.guardrail_hooks.cisco_ai_defense.cisco_ai_defense import (
@@ -30,6 +31,9 @@ from litellm.proxy.guardrails.guardrail_hooks.cisco_ai_defense.cisco_ai_defense 
 _EVENTS: queue.Queue[tuple[dict[str, object], str, str]] = queue.Queue(maxsize=1000)
 _WORKER_LOCK = threading.Lock()
 _WORKER: threading.Thread | None = None
+_BLOCKED_SESSIONS: dict[str, float] = {}
+_BLOCKED_SESSIONS_LOCK = threading.Lock()
+_SESSION_BLOCK_TTL_SECONDS = 24 * 60 * 60
 
 
 def _session_external_id(data: dict[str, Any] | None) -> str:
@@ -53,6 +57,30 @@ def _session_external_id(data: dict[str, Any] | None) -> str:
                 if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9._:-]{1,160}", value):
                     return "opencode:" + value
     return ""
+
+
+def _mark_session_blocked(request_data: dict[str, Any]) -> None:
+    session_id = _session_external_id(request_data)
+    if not session_id:
+        return
+    now = time.monotonic()
+    with _BLOCKED_SESSIONS_LOCK:
+        for key, expiry in list(_BLOCKED_SESSIONS.items()):
+            if expiry <= now:
+                del _BLOCKED_SESSIONS[key]
+        _BLOCKED_SESSIONS[session_id] = now + _SESSION_BLOCK_TTL_SECONDS
+
+
+def _session_is_blocked(request_data: dict[str, Any]) -> bool:
+    session_id = _session_external_id(request_data)
+    if not session_id:
+        return False
+    with _BLOCKED_SESSIONS_LOCK:
+        expiry = _BLOCKED_SESSIONS.get(session_id, 0)
+        if expiry <= time.monotonic():
+            _BLOCKED_SESSIONS.pop(session_id, None)
+            return False
+        return True
 
 
 def _worker() -> None:
@@ -437,6 +465,10 @@ class CorrelatedGalileoObserve(GalileoObserve):
         try:
             if not self._is_configured():
                 return
+            # The guardrail already emitted a session-enforcement trace for
+            # this denial. Do not mislabel it as an unrelated LLM failure.
+            if _session_is_blocked(kwargs):
+                return
             standard_log = kwargs.get("standard_logging_object")
             if not isinstance(standard_log, dict):
                 return
@@ -475,8 +507,77 @@ correlated_galileo = CorrelatedGalileoObserve()
 class TracedCiscoAIDefenseGuardrail(CiscoAIDefenseGuardrail):
     """Retain Cisco's verdict handling and mirror sanitized decisions to Galileo."""
 
+    @staticmethod
+    def _reject_blocked_session(request_data: dict[str, Any], direction: str) -> None:
+        if not _session_is_blocked(request_data):
+            return
+        call_id = str(request_data.get("litellm_call_id") or "")
+        verbose_proxy_logger.warning(
+            "CISCO_AI_DEFENSE_SESSION_BLOCKED call_id=%s direction=%s", call_id, direction
+        )
+        try:
+            payload = _trace_payload(
+                guardrail_name="Cisco AI Defense session enforcement",
+                surface="chat",
+                direction=direction,
+                action="block",
+                status_code=400,
+                duration_ms=0,
+                request_data=request_data,
+                decision={"action": "block", "reason": "prior_input_block_in_session"},
+            )
+            _enqueue(payload, call_id, "block")
+        except Exception as exc:
+            verbose_proxy_logger.error(
+                "GALILEO_GUARDRAIL_TRACE_FAILED error_type=%s", type(exc).__name__
+            )
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Cisco AI Defense blocked this OpenCode session after an earlier input verdict",
+                "code": "ai_defense_session_blocked",
+            },
+        )
+
+    async def async_pre_call_hook(self, user_api_key_dict: Any, cache: Any, data: dict, call_type: str) -> Any:
+        self._reject_blocked_session(data, "input")
+        result = await super().async_pre_call_hook(user_api_key_dict, cache, data, call_type)
+        self._reject_blocked_session(data, "input")
+        return result
+
+    async def _inspect_chat(
+        self,
+        messages: list[dict[str, str]],
+        request_data: dict,
+        user_api_key_dict: Any,
+        direction: str = "input",
+        response_obj: object = None,
+    ) -> dict[str, object]:
+        self._reject_blocked_session(request_data, direction)
+        # OpenCode sends a large trusted system prompt alongside short user
+        # requests. Inspect the untrusted conversation so it cannot dilute a
+        # policy verdict on the user's message.
+        if _session_external_id(request_data):
+            untrusted = [
+                message for message in messages
+                if isinstance(message, dict) and str(message.get("role", "")).lower() != "system"
+            ]
+            if untrusted:
+                messages = untrusted
+        result = await super()._inspect_chat(
+            messages=messages,
+            request_data=request_data,
+            user_api_key_dict=user_api_key_dict,
+            direction=direction,
+            response_obj=response_obj,
+        )
+        self._reject_blocked_session(request_data, direction)
+        return result
+
     def _log_decision(self, context: Any, verdict: Any, duration_ms: float, request_data: dict) -> None:
         super()._log_decision(context, verdict, duration_ms, request_data)
+        if context.direction == "input" and verdict.action == "block":
+            _mark_session_blocked(request_data)
         # Successful calls are exported once by CorrelatedGalileoObserve with
         # input, LLM, and output spans under the same trace. A pre-call block
         # has no LLM success callback, so export its guardrail-only trace here.
