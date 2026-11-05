@@ -1,8 +1,16 @@
-// Give LiteLLM a stable ID for all model calls in one OpenCode session.
-// The proxy uses this only for Galileo session grouping.
-export const LiteLLMGalileoSession = async () => ({
-  "chat.headers": async (input, output) => {
-    if (input.model.providerID !== "litellm") return
-    output.headers["x-opencode-session-id"] = input.sessionID
+// Group every LiteLLM model call from one OpenCode session in Galileo.
+// The header carries only the OpenCode session ID, never prompt content.
+export default {
+  id: "litellm-galileo-session",
+  async setup(ctx) {
+    const registration = await ctx.session.hook(
+      "model.request",
+      (event) => {
+        event.headers["x-opencode-session-id"] = event.sessionID
+      },
+      { providerID: "litellm" },
+    )
+
+    return () => registration.dispose()
   },
-})
+}
